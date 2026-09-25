@@ -1,0 +1,316 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>多标签页日志聚合</title>
+<style>
+  :root { --bg:#0f1420; --panel:#171e2e; --border:#2a3550; --text:#dbe4f5; --muted:#7c8aa8; }
+  * { box-sizing: border-box; }
+  body { margin:0; font:14px/1.5 -apple-system,"Segoe UI",Roboto,"PingFang SC","Microsoft YaHei",sans-serif;
+         background:var(--bg); color:var(--text); }
+  header { padding:12px 20px; border-bottom:1px solid var(--border); display:flex; align-items:center; gap:16px; flex-wrap:wrap; }
+  h1 { font-size:16px; margin:0; }
+  .tabs-info { color:var(--muted); font-size:12px; }
+  main { display:grid; grid-template-columns: 300px 1fr; gap:14px; padding:14px 20px; }
+  .panel { background:var(--panel); border:1px solid var(--border); border-radius:10px; padding:14px; }
+  .panel h2 { font-size:13px; margin:0 0 10px; color:var(--muted); text-transform:uppercase; letter-spacing:.5px; }
+  label { display:block; font-size:12px; color:var(--muted); margin:8px 0 4px; }
+  select, input[type=text] { width:100%; padding:7px 9px; border-radius:6px; border:1px solid var(--border);
+    background:#0d1220; color:var(--text); font-size:13px; }
+  button { cursor:pointer; border:1px solid var(--border); background:#22304f; color:var(--text);
+    border-radius:6px; padding:7px 12px; font-size:13px; }
+  button:hover { background:#2b3d63; }
+  button.active { background:#3b6fe0; border-color:#3b6fe0; color:#fff; }
+  button.danger { background:#5a2430; border-color:#7a3040; }
+  .row { display:flex; gap:8px; margin-top:10px; flex-wrap:wrap; }
+  .stats { display:grid; grid-template-columns:1fr 1fr; gap:6px 12px; font-size:12px; margin-top:10px; }
+  .stats b { color:#fff; font-variant-numeric:tabular-nums; }
+  .filters { display:flex; gap:6px; margin-bottom:10px; flex-wrap:wrap; align-items:center; }
+  .filters button { padding:4px 10px; font-size:12px; }
+  #logList { height:46vh; overflow-y:auto; font:12px/1.6 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+    background:#0b0f1a; border:1px solid var(--border); border-radius:8px; padding:8px 10px; }
+  .log-line { white-space:pre-wrap; word-break:break-all; }
+  .log-line .t { color:var(--muted); }
+  .log-line .tab { color:#8f7ce8; }
+  .lv-debug { color:#8b98b8; } .lv-info { color:#5ec98a; }
+  .lv-warn  { color:#e6c15a; } .lv-error { color:#ef6a6a; }
+  #curve { width:100%; height:120px; display:block; background:#0b0f1a;
+    border:1px solid var(--border); border-radius:8px; }
+  .hint { font-size:11px; color:var(--muted); margin-top:6px; }
+  .truncate-note { color:var(--muted); font-size:11px; padding:2px 0 6px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>📋 多标签页日志聚合</h1>
+  <span class="tabs-info" id="tabInfo">本标签页: …</span>
+  <span class="tabs-info" id="peerInfo">在线标签页: 1</span>
+</header>
+
+<main>
+  <section class="panel">
+    <h2>写入日志</h2>
+    <label>级别</label>
+    <select id="level">
+      <option>debug</option><option selected>info</option>
+      <option>warn</option><option>error</option>
+    </select>
+    <label>消息</label>
+    <input type="text" id="msg" placeholder="输入日志内容，回车发送">
+    <div class="row">
+      <button id="writeBtn">写入一条</button>
+      <button id="autoBtn">开始自动写入</button>
+    </div>
+    <label>自动写入频率</label>
+    <select id="rate">
+      <option value="10">10 条/秒</option>
+      <option value="100" selected>100 条/秒（高频合并）</option>
+      <option value="500">500 条/秒（压力）</option>
+    </select>
+    <div class="row">
+      <button class="danger" id="clearBtn">清空（所有标签页）</button>
+    </div>
+    <div class="stats" id="stats"></div>
+    <div class="hint">提示：多开几个本页面标签页即可验证聚合；新开的标签页会自动同步已有日志。</div>
+  </section>
+
+  <section class="panel">
+    <h2>日志量曲线（最近 60 秒）</h2>
+    <canvas id="curve"></canvas>
+    <div style="height:12px"></div>
+    <h2>聚合日志</h2>
+    <div class="filters" id="filters">
+      <span style="font-size:12px;color:var(--muted)">筛选:</span>
+    </div>
+    <div class="truncate-note" id="truncateNote"></div>
+    <div id="logList"></div>
+  </section>
+</main>
+
+<script src="log-core.js"></script>
+<script>
+(function () {
+  'use strict';
+  const { LEVELS, MAX_LOGS, makeLog, LogStore, Batcher } = window.LogCore;
+
+  // ---- 本标签页标识 ----
+  const TAB_ID = (crypto.randomUUID ? crypto.randomUUID() : String(Math.random()).slice(2)).slice(0, 8);
+  let seq = 0;
+
+  const store = new LogStore(MAX_LOGS);
+  const channel = new BroadcastChannel('multi-tab-log-demo');
+
+  // ---- 状态 ----
+  let currentFilter = 'all';
+  const peers = new Map(); // tabId -> lastSeen
+  peers.set(TAB_ID, Date.now());
+
+  // ---- 高频写入合并：批量广播 ----
+  const batcher = new Batcher((batch) => {
+    channel.postMessage({ type: 'logs', from: TAB_ID, logs: batch });
+  }, { interval: 100, maxBatch: 50 });
+
+  // ---- 接收消息 ----
+  channel.onmessage = (e) => {
+    const m = e.data;
+    if (!m || m.from === TAB_ID) return;
+    switch (m.type) {
+      case 'logs':
+        touchPeer(m.from);
+        if (store.addMany(m.logs) > 0) scheduleRender();
+        break;
+      case 'hello': // 新标签页上线：回一份快照 + 水位线
+        touchPeer(m.from);
+        channel.postMessage({ type: 'sync', from: TAB_ID, to: m.from,
+          logs: store.snapshot(), clearEpoch: store.clearEpoch });
+        channel.postMessage({ type: 'presence', from: TAB_ID });
+        break;
+      case 'sync':
+        if (m.to !== TAB_ID) return;
+        store.clearEpoch = Math.max(store.clearEpoch, m.clearEpoch || 0);
+        if (store.addMany(m.logs) > 0) scheduleRender();
+        break;
+      case 'clear':
+        store.clear(m.at);
+        scheduleRender();
+        break;
+      case 'presence':
+        touchPeer(m.from);
+        break;
+      case 'bye':
+        peers.delete(m.from);
+        renderPeers();
+        break;
+    }
+  };
+
+  function touchPeer(id) { peers.set(id, Date.now()); renderPeers(); }
+  setInterval(() => { // 心跳 + 清理掉线标签页（处理标签页关闭）
+    channel.postMessage({ type: 'presence', from: TAB_ID });
+    const now = Date.now();
+    for (const [id, t] of peers) if (id !== TAB_ID && now - t > 5000) peers.delete(id);
+    renderPeers();
+  }, 2000);
+  window.addEventListener('beforeunload', () => {
+    channel.postMessage({ type: 'bye', from: TAB_ID });
+  });
+
+  // ---- 写入 ----
+  function writeLog(level, msg) {
+    const log = makeLog(TAB_ID, seq++, level, msg);
+    store.add(log);          // 本地立即入库
+    batcher.push(log);       // 合并后广播
+    scheduleRender();
+  }
+
+  document.getElementById('writeBtn').onclick = () => {
+    const msg = document.getElementById('msg').value.trim() || '手动日志';
+    writeLog(document.getElementById('level').value, msg);
+    document.getElementById('msg').value = '';
+  };
+  document.getElementById('msg').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') document.getElementById('writeBtn').click();
+  });
+
+  // 自动写入（含高频压测）
+  let autoTimer = null;
+  document.getElementById('autoBtn').onclick = () => {
+    const btn = document.getElementById('autoBtn');
+    if (autoTimer) {
+      clearInterval(autoTimer); autoTimer = null;
+      btn.textContent = '开始自动写入'; return;
+    }
+    const perSec = Number(document.getElementById('rate').value);
+    const tick = 50, perTick = Math.max(1, Math.round(perSec / (1000 / tick)));
+    autoTimer = setInterval(() => {
+      for (let i = 0; i < perTick; i++) {
+        const lv = LEVELS[Math.floor(Math.random() * LEVELS.length)];
+        writeLog(lv, `auto #${seq} from ${TAB_ID}`);
+      }
+    }, tick);
+    btn.textContent = '停止自动写入';
+  };
+
+  document.getElementById('clearBtn').onclick = () => {
+    const at = Date.now();
+    store.clear(at);
+    channel.postMessage({ type: 'clear', from: TAB_ID, at });
+    scheduleRender();
+  };
+
+  // ---- 筛选 ----
+  const filtersEl = document.getElementById('filters');
+  ['all'].concat(LEVELS).forEach((lv) => {
+    const b = document.createElement('button');
+    b.textContent = lv;
+    b.dataset.lv = lv;
+    if (lv === currentFilter) b.classList.add('active');
+    b.onclick = () => {
+      currentFilter = lv;
+      filtersEl.querySelectorAll('button').forEach((x) => x.classList.toggle('active', x.dataset.lv === lv));
+      scheduleRender();
+    };
+    filtersEl.appendChild(b);
+  });
+
+  // ---- 渲染（合并到每帧一次，避免高频写入卡顿）----
+  const logList = document.getElementById('logList');
+  const RENDER_ROWS = 500; // DOM 只渲染最近 500 条匹配日志
+  let renderScheduled = false;
+  function scheduleRender() {
+    if (renderScheduled) return;
+    renderScheduled = true;
+    requestAnimationFrame(() => { renderScheduled = false; render(); });
+  }
+
+  function render() {
+    const counts = store.counts();
+    const list = store.filter(currentFilter);
+    const shown = list.slice(-RENDER_ROWS);
+    const stick = logList.scrollTop + logList.clientHeight >= logList.scrollHeight - 30;
+
+    logList.textContent = '';
+    const frag = document.createDocumentFragment();
+    for (const log of shown) {
+      const div = document.createElement('div');
+      div.className = 'log-line lv-' + log.level;
+      const time = new Date(log.time);
+      const hh = String(time.getHours()).padStart(2, '0');
+      const mm = String(time.getMinutes()).padStart(2, '0');
+      const ss = String(time.getSeconds()).padStart(2, '0');
+      const ms = String(time.getMilliseconds()).padStart(3, '0');
+      div.innerHTML =
+        `<span class="t">${hh}:${mm}:${ss}.${ms}</span> ` +
+        `<span class="tab">[${log.tab}]</span> ` +
+        `<b>[${log.level.toUpperCase()}]</b> `;
+      div.appendChild(document.createTextNode(log.msg));
+      frag.appendChild(div);
+    }
+    logList.appendChild(frag);
+    if (stick) logList.scrollTop = logList.scrollHeight;
+
+    document.getElementById('truncateNote').textContent =
+      (list.length > RENDER_ROWS ? `仅显示最近 ${RENDER_ROWS} 条（共 ${list.length} 条匹配） ` : '') +
+      (store.truncated > 0 ? `｜已截断最旧 ${store.truncated} 条（上限 ${MAX_LOGS}）` : '');
+
+    document.getElementById('stats').innerHTML =
+      `<span>总日志</span><b>${counts.all}</b>` +
+      `<span>debug / info</span><b>${counts.debug} / ${counts.info}</b>` +
+      `<span>warn / error</span><b>${counts.warn} / ${counts.error}</b>` +
+      `<span>已截断</span><b>${store.truncated}</b>` +
+      `<span>广播批次</span><b>${batcher.batchesSent}</b>` +
+      `<span>批均条数</span><b>${batcher.batchesSent ? (batcher.logsSent / batcher.batchesSent).toFixed(1) : 0}</b>`;
+  }
+
+  function renderPeers() {
+    document.getElementById('tabInfo').textContent = '本标签页: ' + TAB_ID;
+    document.getElementById('peerInfo').textContent = '在线标签页: ' + peers.size;
+  }
+
+  // ---- Canvas 日志量曲线（最近 60 秒，按秒分桶）----
+  const canvas = document.getElementById('curve');
+  const ctx = canvas.getContext('2d');
+  function drawCurve() {
+    const dpr = window.devicePixelRatio || 1;
+    const w = canvas.clientWidth, h = canvas.clientHeight;
+    if (canvas.width !== w * dpr) { canvas.width = w * dpr; canvas.height = h * dpr; }
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, w, h);
+
+    const BUCKETS = 60, now = Date.now();
+    const counts = new Array(BUCKETS).fill(0);
+    for (const log of store.logs) {
+      const idx = BUCKETS - 1 - Math.floor((now - log.time) / 1000);
+      if (idx >= 0 && idx < BUCKETS) counts[idx]++;
+    }
+    const max = Math.max(1, ...counts);
+
+    ctx.strokeStyle = '#2a3550';
+    ctx.beginPath();
+    for (let i = 1; i < 4; i++) { ctx.moveTo(0, h * i / 4); ctx.lineTo(w, h * i / 4); }
+    ctx.stroke();
+
+    ctx.beginPath();
+    counts.forEach((c, i) => {
+      const x = (i / (BUCKETS - 1)) * w;
+      const y = h - 4 - (c / max) * (h - 12);
+      i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+    });
+    ctx.strokeStyle = '#3b6fe0'; ctx.lineWidth = 2; ctx.stroke();
+    ctx.lineTo(w, h); ctx.lineTo(0, h); ctx.closePath();
+    ctx.fillStyle = 'rgba(59,111,224,.15)'; ctx.fill();
+
+    ctx.fillStyle = '#7c8aa8'; ctx.font = '11px sans-serif';
+    ctx.fillText(`峰值 ${max} 条/秒`, 8, 14);
+  }
+  setInterval(drawCurve, 500);
+
+  // ---- 启动：向其他标签页请求同步 ----
+  renderPeers();
+  render();
+  channel.postMessage({ type: 'hello', from: TAB_ID });
+})();
+</script>
+</body>
+</html>
