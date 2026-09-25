@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>多标签页实时日志聚合</title>
+    <link rel="stylesheet" href="./styles.css" />
+    <script type="module" src="./src/app.js"></script>
+  </head>
+  <body>
+    <main class="app">
+      <header class="hero">
+        <div>
+          <p class="eyebrow">BroadcastChannel Log Bus</p>
+          <h1>多标签页实时日志聚合</h1>
+          <p class="subtitle">
+            打开多个标签页，同时写入日志；所有标签页会实时看到一致的聚合结果。
+          </p>
+        </div>
+        <div class="status-card" aria-live="polite">
+          <span id="syncStatus" class="status-dot">同步中</span>
+          <strong id="peerCount">1 个标签页在线</strong>
+          <span id="tabLabel">当前标签页</span>
+        </div>
+      </header>
+
+      <section class="toolbar" aria-label="日志操作">
+        <label class="field">
+          <span>级别</span>
+          <select id="levelSelect">
+            <option value="debug">debug</option>
+            <option value="info" selected>info</option>
+            <option value="warn">warn</option>
+            <option value="error">error</option>
+          </select>
+        </label>
+
+        <label class="field message-field">
+          <span>消息</span>
+          <input
+            id="messageInput"
+            maxlength="500"
+            placeholder="输入日志消息，回车写入"
+            autocomplete="off"
+          />
+        </label>
+
+        <button id="writeButton" type="button">写入</button>
+        <button id="autoButton" type="button">自动写入</button>
+        <button id="burstButton" type="button">压测 2000 条</button>
+
+        <label class="field filter-field">
+          <span>筛选</span>
+          <select id="filterSelect">
+            <option value="all" selected>全部级别</option>
+            <option value="debug">debug</option>
+            <option value="info">info</option>
+            <option value="warn">warn</option>
+            <option value="error">error</option>
+          </select>
+        </label>
+
+        <button id="clearButton" class="danger" type="button">清空</button>
+      </section>
+
+      <section class="stats" aria-live="polite">
+        <span id="logStats">0 / 10000 条</span>
+        <span id="dropStats">已截断 0 条</span>
+        <span id="pendingStats">待发送 0 条</span>
+      </section>
+
+      <section class="chart-panel" aria-label="日志量曲线">
+        <div class="panel-title">
+          <h2>日志量曲线</h2>
+          <span>最近 60 秒</span>
+        </div>
+        <canvas id="logChart" height="180"></canvas>
+      </section>
+
+      <section class="log-panel" aria-label="聚合日志列表">
+        <div class="log-header">
+          <span>时间</span>
+          <span>级别</span>
+          <span>来源</span>
+          <span>消息</span>
+        </div>
+        <div id="logViewport" class="log-viewport" tabindex="0">
+          <div id="logSpacer" class="log-spacer">
+            <div id="logRows" class="log-rows"></div>
+          </div>
+        </div>
+        <div id="emptyState" class="empty-state">暂无日志</div>
+      </section>
+    </main>
+  </body>
+</html>
